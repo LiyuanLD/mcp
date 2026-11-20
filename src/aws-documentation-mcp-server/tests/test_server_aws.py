@@ -24,16 +24,23 @@ from awslabs.aws_documentation_mcp_server.server_aws import (
     search_documentation,
     search_table,
 )
+from awslabs.aws_documentation_mcp_server.util import UnreadablePageError
+from mcp.server.mcpserver import Context
+from typing import Any, Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 from urllib.parse import parse_qs, unquote, urlparse
 
 
-class MockContext:
+class MockContext(Context):
     """Mock context for testing."""
 
-    async def error(self, message):
+    def __init__(self) -> None:
+        """Initialize with no request context; nothing here needs one."""
+        super().__init__()
+
+    async def error(self, data: Any, *, logger_name: Optional[str] = None):
         """Mock error method."""
-        print(f'Error: {message}')
+        print(f'Error: {data}')
 
 
 class TestReadDocumentation:
@@ -47,6 +54,7 @@ class TestReadDocumentation:
 
         mock_response = MagicMock()
         mock_response.status_code = 200
+        mock_response.url = url
         mock_response.text = '<html><body><h1>Test</h1><p>This is a test.</p></body></html>'
         mock_response.headers = {'content-type': 'text/html'}
 
@@ -75,6 +83,7 @@ class TestReadDocumentation:
 
         mock_response = MagicMock()
         mock_response.status_code = 200
+        mock_response.url = url
         mock_response.text = '<html><body><h1>Test</h1><p>This is a test.</p></body></html>'
         mock_response.headers = {'content-type': 'text/html'}
 
@@ -106,10 +115,8 @@ class TestReadDocumentation:
         with patch('httpx.AsyncClient.get', new_callable=AsyncMock) as mock_get:
             mock_get.side_effect = httpx.HTTPError('Connection error')
 
-            result = await read_documentation(ctx, url=url, max_length=10000, start_index=0)
-
-            assert 'Failed to fetch' in result
-            assert 'Connection error' in result
+            with pytest.raises(ValueError, match='Connection error'):
+                await read_documentation(ctx, url=url, max_length=10000, start_index=0)
             mock_get.assert_called_once()
 
     @pytest.mark.asyncio
@@ -143,6 +150,7 @@ class TestReadSections:
 
         mock_response = MagicMock()
         mock_response.status_code = 200
+        mock_response.url = url
         mock_response.text = """<html><body>
             <h2>Introduction</h2>
             <p>This is the introduction.</p>
@@ -188,6 +196,7 @@ class TestReadSections:
 
         mock_response = MagicMock()
         mock_response.status_code = 200
+        mock_response.url = url
         mock_response.text = (
             '<html><body><h2>Getting Started</h2><p>Neuron content.</p></body></html>'
         )
@@ -212,10 +221,8 @@ class TestReadSections:
         with patch('httpx.AsyncClient.get', new_callable=AsyncMock) as mock_get:
             mock_get.side_effect = httpx.HTTPError('Connection error')
 
-            result = await read_sections(ctx, url=url, section_titles=section_titles)
-
-            assert 'Failed to fetch' in result
-            assert 'Connection error' in result
+            with pytest.raises(ValueError, match='Connection error'):
+                await read_sections(ctx, url=url, section_titles=section_titles)
             mock_get.assert_called_once()
 
     @pytest.mark.asyncio
@@ -227,6 +234,7 @@ class TestReadSections:
 
         mock_response = MagicMock()
         mock_response.status_code = 200
+        mock_response.url = url
         # Only h1, no h2 sections
         mock_response.text = (
             '<html><body><h1>Other Section</h1><p>Different content.</p></body></html>'
@@ -248,6 +256,7 @@ class TestReadSections:
 
         mock_response = MagicMock()
         mock_response.status_code = 200
+        mock_response.url = url
         # One h2 section exists, one doesn't
         mock_response.text = '<html><body><h2>Found Section</h2><p>Content here.</p></body></html>'
         mock_response.headers = {'content-type': 'text/html'}
@@ -304,6 +313,7 @@ class TestReadSections:
 
         mock_response = MagicMock()
         mock_response.status_code = 200
+        mock_response.url = url
         mock_response.text = """<html><body>
             <h2>C++ & C# Programming</h2>
             <p>Programming content.</p>
@@ -348,7 +358,8 @@ class TestReadSections:
 
         mock_response = MagicMock()
         mock_response.status_code = 200
-        mock_response.text = '<html><body><h1>This is a page<h1/><h2>Best practices</h2><p>Content here.</p></body></html>'
+        mock_response.url = url
+        mock_response.text = '<html><body><h1>This is a page</h1><h2>Best practices</h2><p>Content here.</p></body></html>'
         mock_response.headers = {'content-type': 'text/html'}
 
         with patch('httpx.AsyncClient.get', new_callable=AsyncMock) as mock_get:
@@ -360,29 +371,28 @@ class TestReadSections:
             assert 'Content here' in result
 
     @pytest.mark.asyncio
-    async def test_read_sections_non_html_content(self):
-        """Test read_sections with non-HTML content."""
+    async def test_read_sections_markdown_content(self):
+        """Test read_sections extracts sections from a negotiated Markdown response."""
         url = 'https://docs.aws.amazon.com/test.html'
         section_titles = ['Introduction']
         ctx = MockContext()
 
         mock_response = MagicMock()
         mock_response.status_code = 200
-        mock_response.text = 'Plain text content without HTML'
-        mock_response.headers = {'content-type': 'text/plain'}
+        mock_response.url = url
+        mock_response.text = '# Page\n\n## Introduction\n\nIntro.\n\n## Other\n\nOther.\n'
+        mock_response.headers = {'content-type': 'text/markdown'}
 
         with patch('httpx.AsyncClient.get', new_callable=AsyncMock) as mock_get:
             mock_get.return_value = mock_response
             with patch(
-                'awslabs.aws_documentation_mcp_server.server_utils.is_html_content'
-            ) as mock_is_html:
-                mock_is_html.return_value = False
-
+                'awslabs.aws_documentation_mcp_server.server_utils.extract_content_from_html'
+            ) as mock_extract:
                 result = await read_sections(ctx, url=url, section_titles=section_titles)
 
-                assert 'Cannot extract sections from non-HTML content' in result
-                assert 'read_documentation tool instead' in result
-                mock_get.assert_called_once()
+            mock_extract.assert_not_called()
+            mock_get.assert_called_once()
+            assert result == f'AWS Documentation from {url}:\n\n## Introduction\n\nIntro.'
 
     @pytest.mark.asyncio
     async def test_read_sections_non_404_error(self):
@@ -397,10 +407,8 @@ class TestReadSections:
         with patch('httpx.AsyncClient.get', new_callable=AsyncMock) as mock_get:
             mock_get.return_value = mock_response
 
-            result = await read_sections(ctx, url=url, section_titles=section_titles)
-
-            assert 'Failed to fetch' in result
-            assert 'status code 500' in result
+            with pytest.raises(ValueError, match='status code 500'):
+                await read_sections(ctx, url=url, section_titles=section_titles)
             mock_get.assert_called_once()
 
     @pytest.mark.asyncio
@@ -412,6 +420,7 @@ class TestReadSections:
 
         mock_response = MagicMock()
         mock_response.status_code = 200
+        mock_response.url = url
         mock_response.text = '<html><body><h2>Test Section</h2><p>Content.</p></body></html>'
         mock_response.headers = {'content-type': 'text/html'}
 
@@ -420,10 +429,10 @@ class TestReadSections:
             with patch(
                 'awslabs.aws_documentation_mcp_server.server_utils.extract_content_from_html'
             ) as mock_extract:
-                # Simulate extract_content_from_html returning an error
-                mock_extract.return_value = '<e>Failed to convert HTML to markdown</e>'
+                # Simulate extraction refusing the page
+                mock_extract.side_effect = UnreadablePageError('Page failed to be simplified')
 
-                with pytest.raises(ValueError, match='Failed to convert HTML to markdown'):
+                with pytest.raises(ValueError, match='could not be read'):
                     await read_sections(ctx, url=url, section_titles=section_titles)
 
     @pytest.mark.asyncio
@@ -435,6 +444,7 @@ class TestReadSections:
 
         mock_response = MagicMock()
         mock_response.status_code = 200
+        mock_response.url = url
         mock_response.text = """<html><body>
             <div class="main-content">
                 <h1>S3 Bucket Guide</h1>
@@ -1089,13 +1099,14 @@ class TestRecommend:
 
         mock_response = MagicMock()
         mock_response.status_code = 200
+        mock_response.url = url
         mock_response.json.return_value = {
-            'highlyRated': {
+            'new': {
                 'items': [
                     {
                         'url': 'https://docs.aws.amazon.com/rec1',
                         'assetTitle': 'Recommendation 1',
-                        'abstract': 'This is recommendation 1.',
+                        'dateCreated': '2026-01-01',
                     }
                 ]
             },
@@ -1118,18 +1129,18 @@ class TestRecommend:
             assert len(results) == 2
             assert results[0].url == 'https://docs.aws.amazon.com/rec1'
             assert results[0].title == 'Recommendation 1'
-            assert results[0].context == 'This is recommendation 1.'
+            assert results[0].context == 'New content added on 2026-01-01'
             assert results[1].url == 'https://docs.aws.amazon.com/rec2'
             assert results[1].title == 'Recommendation 2'
             assert results[1].context == 'This is recommendation 2.'
             mock_get.assert_called_once()
 
-            called_url = mock_get.call_args[0][0]
-            assert '?path=' in called_url
-            assert '&session=' in called_url
-            assert called_url.startswith(
-                'https://api.contentrecs.docs.aws.com/v1/recommendations?path=https://docs.aws.amazon.com/test&session='
+            assert mock_get.call_args.args[0] == (
+                'https://api.contentrecs.docs.aws.com/v1/recommendations'
             )
+            params = mock_get.call_args.kwargs['params']
+            assert params['path'] == 'https://docs.aws.amazon.com/test'
+            assert params['session']
 
     @pytest.mark.asyncio
     async def test_recommend_http_error(self):
@@ -1174,6 +1185,7 @@ class TestRecommend:
 
         mock_response = MagicMock()
         mock_response.status_code = 200
+        mock_response.url = url
         mock_response.json.side_effect = json.JSONDecodeError('Invalid JSON', '', 0)
 
         with patch('httpx.AsyncClient.get', new_callable=AsyncMock) as mock_get:
@@ -1185,6 +1197,59 @@ class TestRecommend:
             assert results[0].url == ''
             assert 'Error parsing recommendations:' in results[0].title
             assert results[0].context is None
+
+    @staticmethod
+    async def _requested_path(url: str) -> str:
+        """Call recommend with an empty API response and return the path it asked about."""
+        response = MagicMock(status_code=200)
+        response.json.return_value = {}
+        with patch('httpx.AsyncClient.get', new_callable=AsyncMock, return_value=response) as get:
+            await recommend(MockContext(), url=url)
+        return get.call_args.kwargs['params']['path']
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        'url',
+        [
+            'https://docs.aws.amazon.com/lambda/latest/dg/invocation-sync.md',
+            'https://docs.aws.amazon.com/lambda/latest/dg/invocation-sync.md#overview',
+            'https://docs.aws.amazon.com/lambda/latest/dg/invocation-sync.html?x=1',
+        ],
+    )
+    async def test_recommend_asks_about_the_html_page(self, url):
+        """Recommendations are indexed by .html page, so a followed .md link maps to one."""
+        assert await self._requested_path(url) == (
+            'https://docs.aws.amazon.com/lambda/latest/dg/invocation-sync.html'
+        )
+
+    @pytest.mark.asyncio
+    async def test_recommend_encodes_the_path(self):
+        """A path with query-significant characters cannot add parameters to the API call."""
+        url = 'https://docs.aws.amazon.com/lambda/latest/dg/a&session=forged'
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(200, json={})
+
+        real_client = httpx.AsyncClient
+        with patch(
+            'httpx.AsyncClient',
+            lambda **kwargs: real_client(transport=httpx.MockTransport(handler), **kwargs),
+        ):
+            await recommend(MockContext(), url=url)
+
+        query = parse_qs(requests[0].url.query.decode())
+        assert query['path'] == [url]
+        assert query['session'] != ['forged']
+
+    @pytest.mark.asyncio
+    async def test_recommend_rejects_unsupported_domain(self):
+        """A URL outside the documentation domains is rejected before any request."""
+        with patch('httpx.AsyncClient.get', new_callable=AsyncMock) as get:
+            with pytest.raises(ValueError, match='URL must be from list of supported domains'):
+                await recommend(MockContext(), url='not a url')
+        get.assert_not_called()
 
 
 class TestSearchTable:
@@ -1198,6 +1263,7 @@ class TestSearchTable:
 
         mock_response = MagicMock()
         mock_response.status_code = 200
+        mock_response.url = url
         mock_response.text = """<html><body>
             <h2>Service quotas</h2>
             <table><thead><tr><th>Name</th><th>Value</th></tr></thead>
@@ -1266,6 +1332,7 @@ class TestSearchTable:
 
         mock_response = MagicMock()
         mock_response.status_code = 200
+        mock_response.url = url
         mock_response.text = """<html><body>
             <h2>Quotas</h2>
             <table><thead><tr><th>Name</th></tr></thead>
@@ -1291,6 +1358,7 @@ class TestSearchTable:
 
         mock_response = MagicMock()
         mock_response.status_code = 200
+        mock_response.url = url
         mock_response.text = """<html><body>
             <h2>Real Section</h2>
             <table><thead><tr><th>A</th></tr></thead>
@@ -1315,6 +1383,7 @@ class TestSearchTable:
 
         mock_response = MagicMock()
         mock_response.status_code = 200
+        mock_response.url = url
         mock_response.text = """<html><body>
             <h2>Section A</h2>
             <table><thead><tr><th>Name</th></tr></thead>
@@ -1347,3 +1416,90 @@ class TestMain:
                 main()
                 mock_logger.assert_called_once_with('Starting AWS Documentation MCP Server')
                 mock_run.assert_called_once()
+
+
+class TestMarkdownPageUrls:
+    """The read tools accept the relative .md links published Markdown carries."""
+
+    MD_URL = 'https://docs.aws.amazon.com/lambda/latest/dg/invocation-sync.md'
+    HTML_URL = 'https://docs.aws.amazon.com/lambda/latest/dg/invocation-sync.html'
+    MODULE = 'awslabs.aws_documentation_mcp_server.server_aws'
+
+    @pytest.mark.asyncio
+    async def test_read_documentation_fetches_html_page_for_md_url(self):
+        """read_documentation reads the .html page at the .md URL's path."""
+        with patch(f'{self.MODULE}.read_documentation_impl', new_callable=AsyncMock) as impl:
+            await read_documentation(
+                MockContext(), url=self.MD_URL, max_length=1000, start_index=0
+            )
+        assert impl.call_args.args[1] == self.HTML_URL
+
+    @pytest.mark.asyncio
+    async def test_read_sections_fetches_html_page_for_md_url(self):
+        """read_sections reads the .html page at the .md URL's path."""
+        with patch(f'{self.MODULE}.read_sections_impl', new_callable=AsyncMock) as impl:
+            await read_sections(MockContext(), url=self.MD_URL, section_titles=['Overview'])
+        assert impl.call_args.args[1] == self.HTML_URL
+
+    @pytest.mark.asyncio
+    async def test_search_table_fetches_html_page_for_md_url(self):
+        """search_table parses HTML, so a .md URL must still reach the .html page."""
+        with patch(f'{self.MODULE}.search_table_impl', new_callable=AsyncMock) as impl:
+            await search_table(
+                MockContext(), url=self.MD_URL, section_title=None, query='foo', max_rows=20
+            )
+        assert impl.call_args.args[1] == self.HTML_URL
+
+    @staticmethod
+    def _mock_client(text: str, content_type: str, url: str) -> MagicMock:
+        response = MagicMock(status_code=200, url=url, text=text)
+        response.headers = {'content-type': content_type}
+        client = MagicMock()
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=None)
+        client.get = AsyncMock(return_value=response)
+        return client
+
+    @pytest.mark.asyncio
+    async def test_md_url_fetches_html_page_with_cached_query_id(self):
+        """A .md link from a search result's page still finds that result's query_id."""
+        from awslabs.aws_documentation_mcp_server.models import SearchResponse, SearchResult
+        from awslabs.aws_documentation_mcp_server.server_utils import (
+            SEARCH_RESULT_CACHE,
+            add_search_result_cache_item,
+        )
+
+        SEARCH_RESULT_CACHE.clear()
+        add_search_result_cache_item(
+            SearchResponse(
+                search_results=[SearchResult(rank_order=1, title='t', url=self.HTML_URL)],
+                facets=None,
+                query_id='qid-1',
+            )
+        )
+        client = self._mock_client('# Sync\n\nSee [a](other.md).', 'text/markdown', self.HTML_URL)
+        try:
+            with patch('httpx.AsyncClient', return_value=client):
+                result = await read_documentation(
+                    MockContext(), url=f'{self.MD_URL}#overview', max_length=1000, start_index=0
+                )
+        finally:
+            SEARCH_RESULT_CACHE.clear()
+
+        requested = urlparse(client.get.call_args.args[0])
+        assert f'{requested.scheme}://{requested.netloc}{requested.path}' == self.HTML_URL
+        assert parse_qs(requested.query)['query_id'] == ['qid-1']
+        assert '[a](other.md)' in result
+
+    @pytest.mark.asyncio
+    async def test_search_table_md_url_requests_html(self):
+        """search_table parses HTML, so a .md URL requests the .html page as HTML."""
+        html = '<html><body><h2>T</h2><table><tr><th>A</th></tr><tr><td>foo</td></tr></table></body></html>'
+        client = self._mock_client(html, 'text/html', self.HTML_URL)
+        with patch('httpx.AsyncClient', return_value=client):
+            await search_table(
+                MockContext(), url=self.MD_URL, section_title=None, query='foo', max_rows=20
+            )
+
+        assert urlparse(client.get.call_args.args[0]).path.endswith('/invocation-sync.html')
+        assert client.get.call_args.kwargs['headers']['Accept'].startswith('text/html')

@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `AUTH_AUDIENCE` and `AUTH_CLIENT_ID` configuration options for `AUTH_TYPE=oauth`, matched against the `aud` and `client_id`/`azp` claims of JWT tokens. Use `AUTH_CLIENT_ID` with providers whose access tokens carry no `aud` claim, such as Amazon Cognito. One of the two is required alongside `AUTH_ISSUER` and `AUTH_JWKS_URI`
+
+### Fixed
+
+- Missing api calls for s3 customizations in static map (#4548)
+- Pass `AWS_API_MCP_ALLOWED_HOSTS` and `AWS_API_MCP_ALLOWED_ORIGINS` through to FastMCP's Host and Origin guard so the `streamable-http` transport no longer rejects every non-localhost `Host` header with `421 Misdirected Request`. The `fastmcp` floor is raised to `>=3.4.3`, the first release that accepts these arguments (#4507)
+
+## [1.5.1] - 2026-08-11
+
+### Fixed
+
+- Operation name matching in security policy (#4432)
+
+## [1.5.0] - 2026-08-05
+
+### Changed
+
+- Upgrade AWS CLI to v1.46.0 (#4444)
+
+## [1.4.0] - 2026-07-23
+
+### Added
+
 - Deprecation warning and feature flag to suppress (#4313)
 
 ## [1.3.47] - 2026-07-22

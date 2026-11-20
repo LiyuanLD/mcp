@@ -43,6 +43,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Security
+
+- **CWE-184** — read-only mode now rejects statement-leading mutating verbs
+  that the fixed `MUTATING_KEYWORDS` scan did not catch. `DO expr`
+  evaluates expressions purely for their side effects and
+  returns no result set, so `DO GET_LOCK(...)` or `DO <writing_function>()`
+  previously slipped past the read-only gate on the RDS Data API path. Also
+  now rejected: `IMPORT`, `START`, `BEGIN`, `COMMIT`, `ROLLBACK`,
+  `SAVEPOINT`, `RELEASE`, `XA`, `CHANGE`, `PURGE`, `STOP`, `BINLOG`,
+  `CLONE`, `RESTART`, `SHUTDOWN`, `USE` (switches the session database),
+  `CACHE INDEX`, `LOAD INDEX INTO CACHE`, and any statement-leading `REPLACE`
+  (e.g. `REPLACE ... SET`, `REPLACE ... VALUES`). These verbs
+  are matched by a new `STATEMENT_START_MUTATING_KEYWORDS` set anchored to
+  statement start (beginning of the comment-stripped SQL or immediately
+  after a `;`) rather than added to `MUTATING_KEYWORDS`, because several are
+  common English words or identifiers (`start`, `stop`, `change`, `release`,
+  `do`) and `REPLACE` is a heavily used string function — a bare
+  anywhere-match would falsely reject benign reads such as
+  `SELECT start FROM schedule`, `SELECT REPLACE(col, 'a', 'b')`,
+  `SELECT ... USE INDEX (i)` (the optimizer hint, distinct from `USE <db>`),
+  or `WHERE note = 'things to do'`. Additionally, the no-space MySQL `#`
+  line comment (`#x\n...`), which `sqlparse` leaves in place, is now
+  stripped before the scan so it can no longer hide a leading verb
+  (e.g. `#x\nDO GET_LOCK(...)`, `#c\nSHUTDOWN`). Follow-up to the read-only
+  bypass hardening first shipped in 1.0.22; the durable control remains a
+  least-privilege MySQL user / IAM role, per the README **Security model**
+  section.
+- **CWE-184** — side-effecting functions are now rejected regardless of how
+  they are invoked, closing the `DO GET_LOCK(...)` vs `SELECT GET_LOCK(...)`
+  asymmetry: `GET_LOCK` / `RELEASE_LOCK` / `RELEASE_ALL_LOCKS` (advisory
+  locks), `MASTER_POS_WAIT` / `SOURCE_POS_WAIT` /
+  `WAIT_FOR_EXECUTED_GTID_SET` / `WAIT_UNTIL_SQL_THREAD_AFTER_GTIDS`
+  (replication waits), `SYS_EXEC` / `SYS_EVAL` (code execution), and
+  `LAST_INSERT_ID(expr)` (sets the session value). Matched anywhere in the
+  query and rejected in both read and write mode, matching the existing
+  `sleep()` / `benchmark()` / `load_file()` treatment. Read-only status
+  probes (`IS_FREE_LOCK`, `IS_USED_LOCK`) and the no-argument
+  `LAST_INSERT_ID()` read remain allowed.
+- **CWE-184** — read-only mode now rejects multi-word mutating keywords
+  (`LOAD DATA`, `LOAD XML`, `REPLACE INTO`, etc.) when their words are
+  separated by any whitespace (multiple spaces, tab, newline), not just a
+  single space. The keyword pattern builder previously ran `re.escape` over
+  the whole phrase, baking in one literal space (`re.escape('LOAD DATA')` →
+  `LOAD\ DATA`), so any other MySQL-legal separator between the words slipped
+  past the gate. The builder now joins words with `\s+`, matching the sibling
+  MSSQL / Oracle / DB2 detectors. Whitespace variant of CVE-2026-85788; this
+  also closes `--` and `#` line comments between keyword words, which
+  comment-stripping reduces to a newline that the earlier comment fix missed.
+  Non-breaking: single-word keywords are unaffected and the change only widens
+  the inter-word separator.
+
+### Changed
+
+- **BREAKING (CWE-319):** TLS is now enforced on the Secrets Manager credential
+  path (`mysqlwire` with a managed secret), not just IAM auth. Previously these
+  connections were plaintext-capable; the server now upgrades them to verified
+  TLS against the bundled Amazon RDS CA bundle. Installations that relied on
+  plaintext or a server-certificate-managed TLS setup must supply `--ca_bundle
+  <path>` (or reinstall to restore the bundled CA bundle), otherwise the
+  connection fails with `CERTIFICATE_VERIFY_FAILED`. The `--ca_bundle` override
+  is now correctly honoured on the `mysqlwire` path as well.
+
 ### Added
 
 - `database_type` parameter on `connect_to_database` accepts `aurora-mysql`,
